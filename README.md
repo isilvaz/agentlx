@@ -40,6 +40,8 @@ Exemplo em producao:
 python agent.py register
 ```
 
+Se o `register` for executado como `root` em Linux com `systemd`, o serviço `agentlx` é instalado e iniciado automaticamente ao final do cadastro.
+
 5. Para iniciar em background manualmente:
 
 ```bash
@@ -92,3 +94,4 @@ sudo python agent.py uninstall-service
 - depois do cadastro, o agent usa `Authorization: Bearer <agent_token>`;
 - o backend so enfileira templates conhecidos;
 - o agent executa apenas o comando retornado pela API para o template liberado.
+- quando o tunel persistente estiver online, a API envia um aviso imediato via WebSocket para antecipar o proximo poll e reduzir a latencia das execucoes.

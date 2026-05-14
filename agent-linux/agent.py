@@ -643,8 +643,9 @@ def build_ws_url(config: dict[str, Any], path: str) -> str:
 
 
 class RealtimeTunnelClient:
-    def __init__(self, config: dict[str, Any]) -> None:
+    def __init__(self, config: dict[str, Any], wake_event: threading.Event | None = None) -> None:
         self.config = config
+        self.wake_event = wake_event
         self.thread: threading.Thread | None = None
         self.stop_event = threading.Event()
         self.loop: asyncio.AbstractEventLoop | None = None
@@ -715,6 +716,11 @@ class RealtimeTunnelClient:
         session_id = payload.get("sessionId", "")
 
         if message_type == "agent.ready":
+            return
+
+        if message_type == "queue.refresh":
+            if self.wake_event is not None:
+                self.wake_event.set()
             return
 
         if message_type == "terminal.open":
@@ -961,6 +967,23 @@ def register_agent(config: dict[str, Any], collector: SnapshotCollector) -> None
     print(f"Agent registrado com machine_id={config['machine_id']} e agent_id={config['agent_id']}")
 
 
+def auto_install_service_after_register() -> None:
+    if not is_linux():
+        return
+
+    if not shutil.which("systemctl"):
+        print("Registro concluido. systemctl nao encontrado; servico nao instalado automaticamente.")
+        return
+
+    if os.geteuid() != 0:
+        print(
+            "Registro concluido. Execute 'sudo python3 agent.py install-service' para instalar o servico automaticamente no boot."
+        )
+        return
+
+    install_systemd_service()
+
+
 def send_heartbeat(config: dict[str, Any], collector: SnapshotCollector) -> dict[str, Any]:
     snapshot, inventory_refreshed = collector.collect_snapshot()
     payload = {
@@ -1008,7 +1031,8 @@ def run_loop(config: dict[str, Any], collector: SnapshotCollector) -> None:
         raise SystemExit("Agent ainda nao registrado. Execute 'python agent.py register' primeiro.")
 
     interval = int(config.get("poll_interval_sec", 30))
-    tunnel = RealtimeTunnelClient(config)
+    wake_event = threading.Event()
+    tunnel = RealtimeTunnelClient(config, wake_event=wake_event)
     tunnel.start()
     print(f"Loop iniciado com intervalo de {interval}s")
     try:
@@ -1025,7 +1049,8 @@ def run_loop(config: dict[str, Any], collector: SnapshotCollector) -> None:
                     send_execution_result(config, execution, time.time())
             except Exception as exc:
                 print(f"[agent] erro: {exc}", file=sys.stderr)
-            time.sleep(interval)
+            wake_event.wait(timeout=interval)
+            wake_event.clear()
     finally:
         tunnel.stop()
 
@@ -1045,6 +1070,7 @@ def main() -> None:
     command = sys.argv[1] if len(sys.argv) > 1 else "run"
     if command == "register":
         register_agent(config, collector)
+        auto_install_service_after_register()
         return
     if command == "once":
         print(json.dumps(send_heartbeat(config, collector), indent=2))
