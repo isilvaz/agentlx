@@ -88,6 +88,35 @@ Para remover:
 sudo python agent.py uninstall-service
 ```
 
+## Instalacao automatizada com `install.sh`
+
+O projeto agora inclui um instalador oficial em `agent-linux/install.sh`.
+
+Depois de publicar `install.sh`, `agent.py`, `requirements.txt` e `config.example.json` em um repositorio publico no GitHub, o uso recomendado fica assim:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/<owner>/<repo>/main/agent-linux/install.sh | sudo bash -s -- \
+  --api-base-url https://api.seudominio.com \
+  --enrollment-token TOKEN_FORTE \
+  --location DC-SP-01
+```
+
+O instalador:
+
+- instala `python3`, `pip` e dependencias basicas se faltarem;
+- baixa ou copia `agent.py`, `requirements.txt` e `config.example.json`;
+- gera `config.json` com os parametros informados;
+- cria virtualenv em `/opt/agentlx/.venv`;
+- instala as dependencias Python;
+- roda `python3 agent.py register`;
+- valida o servico `agentlx` no `systemd`.
+
+Observacoes:
+
+- por padrao, a instalacao vai para `/opt/agentlx`;
+- para o modo `curl | bash` sem parametro extra, ajuste `DEFAULT_SOURCE_BASE_URL` dentro do proprio `install.sh` para o caminho `raw.githubusercontent.com/.../agent-linux` do seu repositorio publico;
+- se preferir, voce tambem pode informar `--source-base-url` em tempo de execucao.
+
 ## Seguranca do MVP
 
 - o cadastro inicial exige `x-agent-enrollment-token`;
