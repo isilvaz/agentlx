@@ -8,6 +8,7 @@ import json
 import os
 import platform
 import pty
+import shlex
 import shutil
 import signal
 import socket
@@ -729,6 +730,9 @@ class RealtimeTunnelClient:
                 session_id,
                 int(payload.get("cols", 120)),
                 int(payload.get("rows", 30)),
+                str(payload.get("executionId", "") or ""),
+                str(payload.get("command", "") or ""),
+                int(payload.get("timeoutSec", 120) or 120),
             )
             return
 
@@ -787,12 +791,143 @@ class RealtimeTunnelClient:
             lambda: asyncio.create_task(self._flush_terminal_output(session_id)),
         )
 
+    def _build_execution_wrapper(self, command: str, timeout_sec: int, marker: str) -> str:
+        quoted_command = shlex.quote(command)
+        timeout_value = max(5, int(timeout_sec))
+        return (
+            "printf '\\r\\n[AgentLX] Executando template em shell ao vivo...\\r\\n'; "
+            f"if command -v timeout >/dev/null 2>&1; then timeout {timeout_value}s sh -lc {quoted_command}; "
+            "else sh -lc "
+            f"{quoted_command}; fi; "
+            "__agentlx_code=$?; "
+            f"printf '\\r\\n{marker}:%s\\r\\n' \"$__agentlx_code\"; "
+            "unset __agentlx_code\r"
+        )
+
+    async def _bootstrap_execution(
+        self,
+        session_id: str,
+        execution_id: str,
+        command: str,
+        timeout_sec: int,
+    ) -> None:
+        session = self.sessions.get(session_id)
+        if not session or session.get("closed") or not execution_id or not command:
+            return
+
+        marker = f"__AGENTLX_EXEC_DONE__{execution_id.replace('-', '')}__"
+        session["execution_monitor"] = {
+            "execution_id": execution_id,
+            "marker": marker,
+            "buffer": "",
+            "captured_output": "",
+            "started_at": iso_now(),
+            "started_monotonic": time.time(),
+            "submitted": False,
+        }
+        await self._write_terminal(
+            session_id,
+            self._build_execution_wrapper(command, timeout_sec, marker),
+        )
+
+    def _consume_execution_output(self, session_id: str, text: str) -> str:
+        session = self.sessions.get(session_id)
+        if not session:
+            return text
+
+        monitor = session.get("execution_monitor")
+        if not monitor or monitor.get("submitted"):
+            return text
+
+        marker = monitor["marker"]
+        combined = f"{monitor['buffer']}{text}"
+        marker_index = combined.find(marker)
+
+        if marker_index < 0:
+            tail_size = len(marker) + 32
+            if len(combined) <= tail_size:
+                monitor["buffer"] = combined
+                return ""
+            safe_output = combined[:-tail_size]
+            monitor["captured_output"] += safe_output
+            monitor["buffer"] = combined[-tail_size:]
+            return safe_output
+
+        line_end_index = combined.find("\n", marker_index)
+        if line_end_index < 0:
+            monitor["buffer"] = combined
+            return ""
+
+        before_marker = combined[:marker_index]
+        marker_line = combined[marker_index : line_end_index + 1]
+        after_marker = combined[line_end_index + 1 :]
+        exit_code_raw = marker_line[len(marker) + 1 :].strip()
+
+        try:
+            exit_code = int(exit_code_raw)
+        except ValueError:
+            exit_code = 1
+
+        monitor["captured_output"] += before_marker
+        monitor["buffer"] = ""
+        monitor["submitted"] = True
+
+        if self.loop:
+            self.loop.create_task(
+                self._submit_bootstrap_result(
+                    execution_id=monitor["execution_id"],
+                    started_at=monitor["started_at"],
+                    started_monotonic=float(monitor["started_monotonic"]),
+                    output=monitor["captured_output"],
+                    exit_code=exit_code,
+                )
+            )
+
+        completion_notice = (
+            f"\r\n[AgentLX] Execucao finalizada com exit code {exit_code}."
+            "\r\n"
+        )
+        return f"{before_marker}{completion_notice}{after_marker}"
+
+    async def _submit_bootstrap_result(
+        self,
+        execution_id: str,
+        started_at: str,
+        started_monotonic: float,
+        output: str,
+        exit_code: int,
+    ) -> None:
+        finished_at = time.time()
+        payload = {
+            "executionId": execution_id,
+            "status": "success" if exit_code == 0 else "failed",
+            "output": output,
+            "errorOutput": "",
+            "exitCode": exit_code,
+            "durationMs": int((finished_at - started_monotonic) * 1000),
+            "startedAt": started_at,
+            "finishedAt": iso_now(finished_at),
+        }
+        try:
+            api_request(
+                self.config,
+                "POST",
+                "/api/agent/executions/result",
+                payload,
+                use_agent_token=True,
+            )
+        except Exception as exc:
+            print(f"[agent][tunnel] falha ao enviar resultado da execucao {execution_id}: {exc}", file=sys.stderr)
+
     async def _open_terminal(
         self,
         websocket: WebSocketConnection,
         session_id: str,
         cols: int,
         rows: int,
+        execution_id: str = "",
+        command: str = "",
+        timeout_sec: int = 120,
     ) -> None:
         if not session_id:
             return
@@ -830,6 +965,7 @@ class RealtimeTunnelClient:
             "closed": False,
             "pending_output": [],
             "flush_handle": None,
+            "execution_monitor": None,
         }
         self.sessions[session_id] = session
 
@@ -857,11 +993,15 @@ class RealtimeTunnelClient:
                 return
 
             text = data.decode("utf-8", errors="replace")
-            session["pending_output"].append(text)
+            display_text = self._consume_execution_output(session_id, text)
+            if display_text:
+                session["pending_output"].append(display_text)
             self._schedule_terminal_flush(session_id)
 
         loop.add_reader(master_fd, handle_readable)
         await self._send_json(websocket, {"type": "terminal.opened", "sessionId": session_id})
+        if execution_id and command:
+            await self._bootstrap_execution(session_id, execution_id, command, timeout_sec)
 
     async def _write_terminal(self, session_id: str, data: str) -> None:
         session = self.sessions.get(session_id)
@@ -892,6 +1032,7 @@ class RealtimeTunnelClient:
             return
 
         session["closed"] = True
+        monitor = session.get("execution_monitor")
         flush_handle = session.get("flush_handle")
         if flush_handle is not None:
             flush_handle.cancel()
@@ -929,6 +1070,17 @@ class RealtimeTunnelClient:
             exit_code = 0
         except OSError:
             exit_code = None
+
+        if monitor and not monitor.get("submitted"):
+            monitor["submitted"] = True
+            output = f"{monitor.get('captured_output', '')}{monitor.get('buffer', '')}"
+            await self._submit_bootstrap_result(
+                execution_id=monitor["execution_id"],
+                started_at=monitor["started_at"],
+                started_monotonic=float(monitor["started_monotonic"]),
+                output=output,
+                exit_code=exit_code if exit_code is not None else 1,
+            )
 
         self.sessions.pop(session_id, None)
         if notify:
