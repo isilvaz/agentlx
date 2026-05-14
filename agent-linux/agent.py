@@ -935,13 +935,17 @@ class RealtimeTunnelClient:
 def register_agent(config: dict[str, Any], collector: SnapshotCollector) -> None:
     snapshot, _ = collector.collect_snapshot(force_inventory_refresh=True)
     payload = {
-        "agentId": config.get("agent_id") or None,
         "agentName": config.get("agent_name", collector.hostname),
-        "machineId": config.get("machine_id") or None,
         "agentVersion": config.get("agent_version", "agentlx-linux-mvp"),
         "pollIntervalSec": config.get("poll_interval_sec", 30),
         "snapshot": snapshot,
     }
+    agent_id = str(config.get("agent_id") or "").strip()
+    machine_id = str(config.get("machine_id") or "").strip()
+    if agent_id:
+        payload["agentId"] = agent_id
+    if machine_id:
+        payload["machineId"] = machine_id
     response = api_request(
         config,
         "POST",
