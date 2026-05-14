@@ -791,43 +791,24 @@ class RealtimeTunnelClient:
             lambda: asyncio.create_task(self._flush_terminal_output(session_id)),
         )
 
-    def _build_execution_wrapper(self, command: str, timeout_sec: int, marker: str) -> str:
+    def _build_execution_wrapper(
+        self,
+        command: str,
+        timeout_sec: int,
+        marker: str,
+        shell_path: str,
+    ) -> str:
+        quoted_shell = shlex.quote(shell_path)
         quoted_command = shlex.quote(command)
         timeout_value = max(5, int(timeout_sec))
         return (
-            "printf '\\r\\n[AgentLX] Executando template em shell ao vivo...\\r\\n'; "
             f"if command -v timeout >/dev/null 2>&1; then timeout {timeout_value}s sh -lc {quoted_command}; "
             "else sh -lc "
             f"{quoted_command}; fi; "
             "__agentlx_code=$?; "
             f"printf '\\r\\n{marker}:%s\\r\\n' \"$__agentlx_code\"; "
-            "unset __agentlx_code\r"
-        )
-
-    async def _bootstrap_execution(
-        self,
-        session_id: str,
-        execution_id: str,
-        command: str,
-        timeout_sec: int,
-    ) -> None:
-        session = self.sessions.get(session_id)
-        if not session or session.get("closed") or not execution_id or not command:
-            return
-
-        marker = f"__AGENTLX_EXEC_DONE__{execution_id.replace('-', '')}__"
-        session["execution_monitor"] = {
-            "execution_id": execution_id,
-            "marker": marker,
-            "buffer": "",
-            "captured_output": "",
-            "started_at": iso_now(),
-            "started_monotonic": time.time(),
-            "submitted": False,
-        }
-        await self._write_terminal(
-            session_id,
-            self._build_execution_wrapper(command, timeout_sec, marker),
+            "unset __agentlx_code; "
+            f"exec {quoted_shell} -i"
         )
 
     def _consume_execution_output(self, session_id: str, text: str) -> str:
@@ -940,6 +921,21 @@ class RealtimeTunnelClient:
             return
 
         shell = shutil.which("bash") or os.environ.get("SHELL") or "/bin/sh"
+        execution_monitor = None
+        bootstrap_wrapper = None
+        if execution_id and command:
+            marker = f"__AGENTLX_EXEC_DONE__{execution_id.replace('-', '')}__"
+            execution_monitor = {
+                "execution_id": execution_id,
+                "marker": marker,
+                "buffer": "",
+                "captured_output": "",
+                "started_at": iso_now(),
+                "started_monotonic": time.time(),
+                "submitted": False,
+            }
+            bootstrap_wrapper = self._build_execution_wrapper(command, timeout_sec, marker, shell)
+
         pid, master_fd = pty.fork()
         if pid == 0:
             os.environ["TERM"] = "xterm-256color"
@@ -948,6 +944,8 @@ class RealtimeTunnelClient:
                 os.chdir(resolve_terminal_working_directory(self.config))
             except OSError:
                 pass
+            if bootstrap_wrapper:
+                os.execv(shell, [shell, "-lc", bootstrap_wrapper])
             os.execv(shell, [shell, "-i"])
 
         os.set_blocking(master_fd, False)
@@ -965,7 +963,7 @@ class RealtimeTunnelClient:
             "closed": False,
             "pending_output": [],
             "flush_handle": None,
-            "execution_monitor": None,
+            "execution_monitor": execution_monitor,
         }
         self.sessions[session_id] = session
 
@@ -1000,8 +998,6 @@ class RealtimeTunnelClient:
 
         loop.add_reader(master_fd, handle_readable)
         await self._send_json(websocket, {"type": "terminal.opened", "sessionId": session_id})
-        if execution_id and command:
-            await self._bootstrap_execution(session_id, execution_id, command, timeout_sec)
 
     async def _write_terminal(self, session_id: str, data: str) -> None:
         session = self.sessions.get(session_id)
