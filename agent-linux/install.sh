@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-DEFAULT_SOURCE_BASE_URL=""
+DEFAULT_SOURCE_BASE_URL="https://raw.githubusercontent.com/isilvaz/agentlx/main/agent-linux"
 DEFAULT_INSTALL_DIR="/opt/agentlx"
 
 API_BASE_URL=""
