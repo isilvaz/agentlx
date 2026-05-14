@@ -1,0 +1,14 @@
+{
+  "api_base_url": "http://localhost:3000",
+  "enrollment_token": "agentlx-enrollment-dev",
+  "agent_name": "agentlx-demo-01",
+  "location": "DC-SP-01",
+  "poll_interval_sec": 30,
+  "inventory_refresh_interval_sec": 300,
+  "terminal_output_batch_ms": 16,
+  "terminal_working_directory": "",
+  "agent_version": "agentlx-linux-mvp",
+  "agent_token": "",
+  "machine_id": "",
+  "agent_id": ""
+}
